@@ -1,0 +1,63 @@
+# Scheduled Azure SQL row truncation.
+#
+# Runs on your self-hosted agent pool so it can reach a private-endpoint SQL
+# server. Authenticates via an ADO service connection; the service connection's
+# principal needs a contained user in the target database. See
+# sql/grant_pipeline_user.sql for the one-off grant to run as the server's
+# Entra admin.
+
+schedules:
+  - cron: "0 2 * * *"          # 02:00 UTC daily. Adjust to taste.
+    displayName: Nightly SQL truncation
+    branches:
+      include:
+        - main
+    always: true                # Run even if there are no commits since last run.
+
+trigger: none
+pr: none
+
+pool:
+  name: REPLACE_WITH_YOUR_AGENT_POOL_NAME
+
+variables:
+  azureSubscription: REPLACE_WITH_YOUR_SERVICE_CONNECTION_NAME
+  sqlServerFqdn:     REPLACE.database.windows.net
+  databaseName:      REPLACE_WITH_DATABASE_NAME
+  truncationSql:     "TRUNCATE TABLE dbo.MyTable;"
+
+steps:
+  - task: AzurePowerShell@5
+    displayName: Execute truncation SQL
+    inputs:
+      azureSubscription: $(azureSubscription)
+      azurePowerShellVersion: LatestVersion
+      pwsh: true
+      ScriptType: InlineScript
+      Inline: |
+        $ErrorActionPreference = 'Stop'
+
+        if (-not (Get-Module -ListAvailable -Name SqlServer)) {
+            Write-Host "Installing SqlServer module for current user..."
+            Install-Module -Name SqlServer -Scope CurrentUser -Force -AllowClobber -AcceptLicense | Out-Null
+        }
+        Import-Module SqlServer
+
+        Write-Host "Requesting access token for https://database.windows.net/ ..."
+        $raw = Get-AzAccessToken -ResourceUrl 'https://database.windows.net/'
+        $token = if ($raw.Token -is [securestring]) {
+            [System.Net.NetworkCredential]::new('', $raw.Token).Password
+        } else {
+            $raw.Token
+        }
+
+        Write-Host "Executing against $(sqlServerFqdn) / $(databaseName) ..."
+        Invoke-Sqlcmd `
+            -ServerInstance '$(sqlServerFqdn)' `
+            -Database       '$(databaseName)' `
+            -AccessToken    $token `
+            -Query          '$(truncationSql)' `
+            -QueryTimeout   0 `
+            -EncryptConnection `
+            -AbortOnError
+        Write-Host "Done."
